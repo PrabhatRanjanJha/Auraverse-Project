@@ -1,25 +1,26 @@
 """
 content_labeler_impl.py
---------------------------------------------------
-Stable, dependency-free topic inference system.
-No ML models required. No sentence-transformers.
-Works 100% offline.
+-----------------------------------------------------------
+TRUE semantic topic extraction using YAKE (offline).
+No predefined labels. No rule-based keywords.
 
-This classifier:
-- Reads txt, pdf, docx, pptx, csv, md, html, rtf
-- Extracts text
-- Applies semantic keyword analysis
-- Maps meaning → topic
---------------------------------------------------
+Process:
+1. Extract text
+2. Clean text
+3. Use YAKE to extract top meaningful keywords
+4. First keyword = topic
+-----------------------------------------------------------
 """
 
 from pathlib import Path
 import re
+import yake
+from typing import Optional
 
 # ------------------------------------------------------------
-# EXTRACT TEXT FROM FILES
+# EXTRACT TEXT FROM ANY DOCUMENT TYPE
 # ------------------------------------------------------------
-def extract_text(path, ext):
+def extract_text(path: str, ext: str) -> str:
     try:
         if ext == "txt":
             return Path(path).read_text(encoding="utf-8", errors="ignore")
@@ -41,100 +42,68 @@ def extract_text(path, ext):
                 shape.text for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text")
             )
 
-        elif ext in {"csv", "md", "html", "htm", "rtf"}:
+        elif ext in {"csv", "html", "htm", "md", "rtf"}:
             return Path(path).read_text(encoding="utf-8", errors="ignore")
 
     except Exception as e:
-        print("[WARN] Extraction failed:", e)
+        print("[WARN] Failed to extract text:", e)
 
     return ""
 
 
 # ------------------------------------------------------------
-# SEMANTIC TOPIC MAPS (RULE-BASED)
+# CLEAN TEXT BEFORE KEYWORD EXTRACTION
 # ------------------------------------------------------------
-SEMANTIC_MAP = {
-    "dragon": [
-        "scale", "scaly", "horn", "fire", "fire-breath", "wing", "wings",
-        "myth", "mythical", "creature", "beast",
-        "cave", "mountain lair", "lair",
-        "giant", "tail",
-    ],
-    "animal": [
-        "fur", "claw", "tail", "wild", "forest",
-        "mammal", "predator", "hunt",
-    ],
-    "technology": [
-        "software", "algorithm", "computer", "system",
-        "data", "hardware", "ai", "machine", "network"
-    ],
-    "finance": [
-        "money", "bank", "investment", "loan", "market", "trade", "stock"
-    ],
-    "medicine": [
-        "health", "disease", "treatment", "patient", "clinical"
-    ],
-    "history": [
-        "ancient", "king", "empire", "historic", "civilization"
-    ]
-}
-
-STOPWORDS = {
-    "the","and","for","with","that","this","from","have","were","which","their",
-    "they","your","about","there","what","when","where","who","been","will",
-    "could","should","also","these","those","each","many","some","more","such",
-    "only","other","into","than","said","says","say","are","was","his","her","its",
-    "you","their","them","she","he"
-}
+def clean_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text)  # normalize spaces
+    return text.strip()
 
 
 # ------------------------------------------------------------
-# SEMANTIC TOPIC DETECTION (NO ML)
+# SEMANTIC TOPIC USING YAKE (OFFLINE)
 # ------------------------------------------------------------
-def semantic_infer(text: str) -> str:
-    text = text.lower()
-    words = re.findall(r"[a-z]{3,}", text)
+def infer_topic(text: str) -> str:
+    text = clean_text(text)
 
-    if not words:
+    if len(text) < 20:
         return "unknown"
 
-    words = [w for w in words if w not in STOPWORDS]
+    # YAKE keyword extractor
+    kw_extractor = yake.KeywordExtractor(
+        lan="en",
+        n=1,             # 1-word keywords (best for folder names)
+        top=5,           # take 5 best keywords
+        dedupLim=0.9
+    )
 
-    # Count topic scores
-    scores = {topic: 0 for topic in SEMANTIC_MAP}
+    keywords = kw_extractor.extract_keywords(text)
 
-    for word in words:
-        for topic, keys in SEMANTIC_MAP.items():
-            for key in keys:
-                if key in word:
-                    scores[topic] += 1
+    if not keywords:
+        return "unknown"
 
-    # Pick the highest scoring topic
-    best_topic = max(scores, key=lambda t: scores[t])
+    # keywords → list of (phrase, score)
+    best_keyword = keywords[0][0]
 
-    if scores[best_topic] > 0:
-        return best_topic
+    # cleanup
+    best_keyword = best_keyword.lower().strip()
+    best_keyword = re.sub(r"[^a-z0-9]+", "_", best_keyword).strip("_")
 
-    # If no semantic match → fallback to strongest keyword
-    from collections import Counter
-    return Counter(words).most_common(1)[0][0]
+    return best_keyword or "unknown"
 
 
 # ------------------------------------------------------------
-# FINAL ENTRY POINT
+# MAIN ENTRY POINT
 # ------------------------------------------------------------
-def label_from_content(path: str, file_type=None) -> str:
+def label_from_content(path: str, file_type: Optional[str] = None) -> str:
     ext = (file_type or Path(path).suffix[1:]).lower()
 
     text = extract_text(path, ext)
 
-    if text:
-        topic = semantic_infer(text)
+    if text.strip():
+        topic = infer_topic(text)
         return topic
 
     # fallback → filename
     name = Path(path).stem.lower()
-    name = re.sub(r"[^a-z0-9]+", " ", name).strip()
-    if not name:
-        return "unknown"
-    return name
+    name = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
+    return name or "unknown"
