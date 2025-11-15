@@ -1,112 +1,69 @@
-# main.py
-import streamlit as st
+from typing import List, Dict, Any
+from storage.sql_store import SQLStore
+from storage.doc_store import DocStore
+from storage.schema_analyzer import analyze_batch, propose_sql_model
+from models.registry import SchemaRegistry
+from rag.retriever import SchemaRetriever
+from rag.query_router import QueryRouter, build_sql_query, build_doc_query
 import json
-import os
-import shutil
-import time
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+import sqlite3
 
-from JSON_handler import is_sql_compatible, generate_schema, handle_nosql_json
+class IngestionApp:
+    def __init__(self, sql_path="data_sql.db", doc_path="data_doc.db"):
+        self.sql = SQLStore(sql_path)
+        self.doc = DocStore(doc_path)
+        self.registry = SchemaRegistry()
+        self.retriever = SchemaRetriever()
+        self.router = QueryRouter(self.registry)
 
+    def ingest(self, json_objects: List[Dict[str, Any]], metadata: str = ""):
+        analysis = analyze_batch(json_objects)
+        if analysis["decision"] == "SQL":
+            model = propose_sql_model(analysis)
+            # use first doc for initial types
+            items, childs = self.sql.ensure_schema(model, json_objects[0])
+            self.sql.insert(model, json_objects)
+            # register schema
+            self.registry.register(model["top_table"], model, notes=metadata)
+        else:
+            # Document store: record paths, keep snapshot
+            paths = sorted(list(analysis["path_types"].keys()))
+            schema = {"paths": paths, "namespace": "default"}
+            self.doc.insert(json_objects, namespace="default")
+            self.registry.register("default", schema, notes=metadata)
+        # rebuild retriever
+        self.retriever.build(self.registry)
 
-UPLOADS_DIR = "uploads"
-SQL_DIR = "structured_data"
-NOSQL_DIR = "unstructured_data"
+    def search_schema(self, text_query: str, top_k=5):
+        return self.retriever.search(text_query, top_k=top_k)
 
+    def query(self, query_req: Dict[str, Any]):
+        route, req = self.router.route(query_req)
+        if route == "SQL":
+            schema = self.registry.get(req["target"])
+            sql, params = build_sql_query(schema, req)
+            with sqlite3.connect(self.sql.engine.url.database) as conn:
+                rows = conn.execute(sql, params).fetchall()
+                cols = [d[0] for d in conn.execute(f"PRAGMA table_info({schema['top_table']})")]
+            return {"type": "SQL", "rows": rows}
+        else:
+            dq = build_doc_query(req)
+            res = self.doc.query(namespace=dq["namespace"], filters=dq["filters"])
+            return {"type": "DOC", "docs": res}
 
-def ensure_directories():
-    """Create all required directories."""
-    for d in [UPLOADS_DIR, SQL_DIR, NOSQL_DIR]:
-        os.makedirs(d, exist_ok=True)
-
-
-def classify_and_move(file_path):
-    """Classify uploaded JSON file and move accordingly."""
-    if not file_path.endswith(".json"):
-        return
-
-    try:
-        with open(file_path, "r") as f:
-            data = json.load(f)
-    except Exception as e:
-        st.write(f"❌ Error reading {file_path}: {e}") #To be replaced by st.write()
-        return
-
-    filename = os.path.basename(file_path)
-    name, _ = os.path.splitext(filename)
-
-    if is_sql_compatible(data):
-        st.write(f"✅ '{filename}' classified as SQL-compatible.")
-        sql_schema = generate_schema(data, schema_name=name)
-
-        # Move JSON file
-        shutil.move(file_path, os.path.join(SQL_DIR, filename))
-
-        # Save schema as .sql
-        schema_path = os.path.join(SQL_DIR, f"{name}_schema.sql")
-        with open(schema_path, "w") as f:
-            f.write(sql_schema)
-
-        st.write(f"→ Moved to '{SQL_DIR}' and created '{schema_path}'\n")
-    else:
-        st.write(f"⚠️ '{filename}' classified as NoSQL.")
-        message = handle_nosql_json(data, collection_name=name)
-        shutil.move(file_path, os.path.join(NOSQL_DIR, filename))
-        st.write(f"→ Moved to '{NOSQL_DIR}'\n{message}\n")
-
-
-# class UploadEventHandler(FileSystemEventHandler):
-#     """Watches for new JSON uploads."""
-
-#     def on_created(self, event):
-#         if not event.is_directory:
-#             classify_and_move(event.src_path)
-
-
+# Example usage:
 if __name__ == "__main__":
-    ensure_directories()
-    st.title("JSON Handler - Upload & Process")
-    st.write("📤 Upload JSON files to classify and process them")
-    
-    # Streamlit file uploader
-    uploaded_file = st.file_uploader("Choose a JSON file", type="json")
-    
-    if uploaded_file is not None:
-        try:
-            data = json.load(uploaded_file)
-            filename = uploaded_file.name
-            name, _ = os.path.splitext(filename)
-            
-            # Save file to uploads directory
-            file_path = os.path.join(UPLOADS_DIR, filename)
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-
-
-           
-
-
-            # Classify and process
-            if is_sql_compatible(data):
-                st.success(f"✅ '{filename}' classified as SQL-compatible.")
-                shutil.move(file_path, os.path.join(SQL_DIR, filename))
-               
-                
-                
-            else:
-                st.warning(f"⚠️ '{filename}' classified as NoSQL.")
-                message = handle_nosql_json(data, collection_name=name)
-                shutil.move(file_path, os.path.join(NOSQL_DIR, filename))
-                st.info(f"→ Moved to '{NOSQL_DIR}'\n{message}")
-
-             #Creating The Schema
-            JSON_schema = generate_schema(data, schema_name=name)
-            st.json(JSON_schema)
-            schema_path = os.path.join(SQL_DIR, f"{name}_schema.sql")
-            with open(schema_path, "w") as f:
-                json.dump(JSON_schema, f, indent=4)
-                st.info(f"→ Moved to '{SQL_DIR}' and created '{schema_path}'")
-                
-        except Exception as e:
-            st.error(f"❌ Error processing file: {e}")
+    app = IngestionApp()
+    sample = [
+        {"id": 1, "name": "Alice", "country": "IN", "orders": [{"sku": "A1", "qty": 2}]},
+        {"id": 2, "name": "Bob", "country": "US", "orders": [{"sku": "B1", "qty": 1}, {"sku": "B2", "qty": 3}]}
+    ]
+    app.ingest(sample, metadata="Customer orders batch Nov15")
+    print(app.search_schema("orders customers country"))
+    print(app.query({"target": "items", "filters": {"country": "IN"}, "fields": ["id","name"], "limit": 10}))
+    # Document path example
+    docs = [{"event": "click", "user": {"id": 99}, "meta": {"page": "home"}},
+            {"event": "view", "meta": {"page": "product"}, "score": 0.87}]
+    app.ingest(docs, metadata="Telemetry stream")
+    print(app.search_schema("events telemetry meta"))
+    print(app.query({"target": "default", "filters": {"event": "click"}}))

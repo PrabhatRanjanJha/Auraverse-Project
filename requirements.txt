@@ -1,0 +1,14 @@
+# Core database + ORM
+SQLAlchemy==2.0.23
+sqlite-utils==3.36.0   # optional helper for SQLite JSON1 ops
+
+# Machine learning / retrieval
+scikit-learn==1.5.1
+numpy==1.26.4
+scipy==1.14.1
+
+# Utilities
+typing-extensions==4.12.2
+
+# Optional: if you want a Streamlit UI later
+streamlit==1.39.0
