@@ -1,0 +1,15 @@
+{
+  "user_id": "u123",
+  "name": "Bob",
+  "preferences": {
+    "theme": "dark",
+    "notifications": {
+      "email": true,
+      "sms": false
+    }
+  },
+  "recent_orders": [
+    { "order_id": "o001", "amount": 250 },
+    { "order_id": "o002", "amount": 175 }
+  ]
+}
