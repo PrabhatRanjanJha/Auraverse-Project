@@ -1,52 +1,69 @@
 """
-app.py - Streamlit UI
-
-Run:
-    streamlit run app.py
+app.py - Streamlit frontend
 """
-import os
-import tempfile
+
 import streamlit as st
-from classifier import classify_and_organize
+import requests
 
-st.set_page_config(page_title="Smart File Classifier", layout="wide")
-st.title("Smart File Classifier")
-st.markdown("Upload files and they'll be organized into `categorized_data/<FileType>/`")
+BACKEND_URL = "http://192.168.2.14:8000"
 
-uploaded = st.file_uploader("Upload files", accept_multiple_files=True)
+st.set_page_config(page_title="File Uploader", layout="centered")
 
-base_dir = "categorized_data"
-os.makedirs(base_dir, exist_ok=True)
+# -------------------------------------
+# Login system
+# -------------------------------------
+if "token" not in st.session_state:
+    st.session_state.token = None
 
-if uploaded:
-    progress = st.progress(0)
-    total = len(uploaded)
-    i = 0
+st.title("Secure File Manager")
 
-    for u in uploaded:
-        i += 1
-        tmpdir = tempfile.gettempdir()
-        tmp_path = os.path.join(tmpdir, u.name)
+if not st.session_state.token:
+    st.subheader("Login")
 
-        # avoid filename collisions in temp folder
-        if os.path.exists(tmp_path):
-            name, ext = os.path.splitext(u.name)
-            cnt = 1
-            while os.path.exists(tmp_path):
-                tmp_path = os.path.join(tmpdir, f"{name}_{cnt}{ext}")
-                cnt += 1
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-        with open(tmp_path, "wb") as f:
-            f.write(u.read())
+    if st.button("Login"):
+        r = requests.post(f"{BACKEND_URL}/login", json={
+            "username": username,
+            "password": password
+        })
 
-        try:
-            _, _, ftype, new_path = classify_and_organize(tmp_path, base_dir)
-            st.success(f"**{u.name}** → Type: `{ftype}`")
-            st.code(new_path)
-        except Exception as e:
-            st.error(f"Failed to process {u.name}: {e}")
+        if r.status_code == 200 and r.json().get("success"):
+            st.session_state.token = r.json()["token"]
+            st.success("Logged in!")
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
 
-        progress.progress(int(i / total * 100))
+else:
+    st.success("Logged in")
+    st.write("### Upload File")
 
-    st.balloons()
-    st.info("Done — check categorized_data.")
+    uploaded = st.file_uploader("Choose file")
+
+    if uploaded:
+        files = {"file": (uploaded.name, uploaded.read())}
+        headers = {"Authorization": st.session_state.token}
+
+        r = requests.post(f"{BACKEND_URL}/upload", files=files, headers=headers)
+
+        if r.status_code == 200:
+            info = r.json()
+            st.success(f"Uploaded! File ID: {info['file_id']}")
+            st.code(info["file_id"])
+        else:
+            st.error("Error during upload")
+
+    st.write("### Download File")
+    fid = st.text_input("Enter File ID")
+
+    if st.button("Download"):
+        headers = {"Authorization": st.session_state.token}
+        url = f"{BACKEND_URL}/download/{fid}"
+
+        r = requests.get(url, headers=headers)
+        if r.status_code == 200:
+            st.download_button("Download file", r.content, file_name=f"{fid}")
+        else:
+            st.error(f"Error: {r.json().get('error')}")
