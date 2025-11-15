@@ -1,54 +1,46 @@
-# app.py
-import streamlit as st
+"""
+app.py - Streamlit UI
+
+Run:
+    streamlit run app.py
+"""
 import os
 import tempfile
+import streamlit as st
 from classifier import classify_and_organize
 
-st.set_page_config(page_title="Smart File Classifier", page_icon="📂", layout="wide")
-st.title("📂 Smart File Classifier")
-st.markdown("Upload any file — I will classify it **by content topic** and organize it.")
+st.set_page_config(page_title="Smart File Classifier", layout="wide")
+st.title("Smart File Classifier")
+st.markdown("Upload files and they'll be organized into `categorized_data/<topic>/<subtopic>/<FileType>/`")
 
-uploaded_files = st.file_uploader(
-    "Upload files",
-    accept_multiple_files=True
-)
+uploaded = st.file_uploader("Upload files", accept_multiple_files=True)
 
 base_dir = "categorized_data"
 os.makedirs(base_dir, exist_ok=True)
 
-if uploaded_files:
-    st.info(f"Processing {len(uploaded_files)} file(s)...")
+if uploaded:
     progress = st.progress(0)
+    total = len(uploaded)
     i = 0
-
-    for uploaded_file in uploaded_files:
+    for u in uploaded:
         i += 1
-
-        # Save to temp preserving original name
-        tmp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(tmp_dir, uploaded_file.name)
-
-        # Avoid collisions
-        if os.path.exists(temp_path):
-            name, ext = os.path.splitext(uploaded_file.name)
-            counter = 1
-            while os.path.exists(temp_path):
-                temp_path = os.path.join(tmp_dir, f"{name}_{counter}{ext}")
-                counter += 1
-
-        # Write file
-        with open(temp_path, "wb") as f:
-            f.write(uploaded_file.read())
-
-        # Classify and move
+        tmpdir = tempfile.gettempdir()
+        tmp_path = os.path.join(tmpdir, u.name)
+        # avoid collisions
+        if os.path.exists(tmp_path):
+            name, ext = os.path.splitext(u.name)
+            cnt = 1
+            while os.path.exists(tmp_path):
+                tmp_path = os.path.join(tmpdir, f"{name}_{cnt}{ext}")
+                cnt += 1
+        with open(tmp_path, "wb") as f:
+            f.write(u.read())
         try:
-            topic, file_type, new_path = classify_and_organize(temp_path, base_dir)
-            st.success(f"**{uploaded_file.name}** → Topic: `{topic}` → Type: `{file_type}`")
+            coarse, fine, ftype, new_path = classify_and_organize(tmp_path, base_dir)
+            st.success(f"**{u.name}** → Topic: `{coarse}` / Subtopic: `{fine}` → Type: `{ftype}`")
             st.code(new_path)
         except Exception as e:
-            st.error(f"Failed to classify {uploaded_file.name}: {e}")
-
-        progress.progress(int(i / len(uploaded_files) * 100))
-
+            st.error(f"Failed to process {u.name}: {e}")
+        progress.progress(int(i/total*100))
     st.balloons()
-    st.info("🎉 All files processed! Check the `categorized_data` folder.")
+    st.info("Done — check categorized_data.")

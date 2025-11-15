@@ -1,84 +1,85 @@
-# classifier.py
+"""
+classifier.py
+
+Routes uploaded files to right predictor and organizes into:
+categorized_data/<coarse_topic>/<fine_topic_or_filename>/<FileType>/filename
+
+Returns:
+    (coarse_topic, fine_topic, file_type, new_path)
+"""
 import os
 import shutil
 from pathlib import Path
 
 from content_labeler_impl import label_from_content
-from video_predictor import label_from_video   # <-- CORRECT FUNCTION
+from video_predictor import label_from_video
+from image_predictor import load_model, classify_image, get_general_category
+from PIL import Image
 
-# -----------------------------------------------------------
-# CLASSIFY & ORGANIZE
-# -----------------------------------------------------------
+IMAGE_EXTS = {"jpg","jpeg","png","webp","bmp","gif","tiff"}
+VIDEO_EXTS = {"mp4","mkv","avi","mov","webm","flv"}
+DOC_EXTS = {"txt","pdf","doc","docx","rtf","md","html","htm","pptx","csv","xls","xlsx"}
 
-def classify_and_organize(path: str, base_dir: str = "categorized_data"):
-    """
-    Classifies any file (text, doc, pdf, video, image)
-    Returns: (topic, file_type, new_path)
-    """
+def _safe_filename(name: str) -> str:
+    name = name.lower().strip()
+    name = "".join(c if c.isalnum() or c in (" ","_","-") else "_" for c in name)
+    name = name.replace(" ", "_")
+    return name or "unknown"
 
-    # extension without dot
-    ext = Path(path).suffix.lower().replace(".", "")
+def classify_and_organize(src_path: str, base_dir: str = "categorized_data"):
+    if not os.path.exists(src_path):
+        raise FileNotFoundError(src_path)
 
-    # --------------------------
-    # Determine FILE TYPE GROUP
-    # --------------------------
-    if ext in {"txt", "pdf", "docx", "pptx", "csv", "md", "rtf", "html", "htm"}:
-        file_type = "Documents"
+    p = Path(src_path)
+    ext = p.suffix.lstrip(".").lower()
+    file_type_folder = "Others"
+    coarse = None
+    fine = None
 
-        topic = label_from_content(path, ext)
+    try:
+        if ext in IMAGE_EXTS:
+            file_type_folder = "Images"
+            model = load_model()
+            img = Image.open(src_path).convert("RGB")
+            fine_label, decoded = classify_image(model, img)  # fine label
+            fine = _safe_filename(fine_label)
+            coarse = _safe_filename(get_general_category(fine_label))
 
-    elif ext in {"jpg", "jpeg", "png", "bmp", "gif", "webp"}:
-        file_type = "Images"
+        elif ext in VIDEO_EXTS:
+            file_type_folder = "Videos"
+            topic = label_from_video(src_path)
+            coarse = _safe_filename(topic)
+            fine = coarse
 
-        # image predictor returns Imagenet class → OK for folder name
-        from image_predictor import load_model, classify_image
-        from PIL import Image
+        elif ext in DOC_EXTS:
+            file_type_folder = "Documents"
+            topic = label_from_content(src_path, ext)
+            coarse = _safe_filename(topic)
+            fine = coarse
 
-        model = load_model()
-        img = Image.open(path).convert("RGB")
-        preds = classify_image(model, img)
-
-        if preds:
-            topic = preds[0][1].lower().replace(" ", "_")
         else:
-            topic = "unknown"
+            file_type_folder = "Others"
+            coarse = _safe_filename(p.stem)
+            fine = coarse
 
-    elif ext in {"mp4", "avi", "mkv", "mov", "webm"}:
-        file_type = "Videos"
+    except Exception as e:
+        print(f"[classifier] error during classification: {e}")
+        coarse = _safe_filename(p.stem)
+        fine = coarse
 
-        topic = label_from_video(path)    # <-- FIXED
+    # Build destination: base_dir / coarse / fine / FileType / filename
+    dest_dir = Path(base_dir) / coarse / fine / file_type_folder
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
-    else:
-        file_type = "Others"
-        topic = "unknown"
+    # avoid overwrite
+    dest_path = dest_dir / p.name
+    if dest_path.exists():
+        name, extension = os.path.splitext(p.name)
+        i = 1
+        while (dest_dir / f"{name}_{i}{extension}").exists():
+            i += 1
+        dest_path = dest_dir / f"{name}_{i}{extension}"
 
-    # Clean topic name
-    topic = topic.strip().replace(" ", "_")
-    topic = topic.replace("__", "_")
-    topic = topic.lower()
-    if not topic or topic == "":
-        topic = "unknown"
+    shutil.move(src_path, str(dest_path))
 
-    # ------------------------------------
-    # FINAL SAVE PATH
-    # categorized_data/topic/fileType/file
-    # ------------------------------------
-    topic_dir = os.path.join(base_dir, topic)
-    type_dir = os.path.join(topic_dir, file_type)
-
-    os.makedirs(type_dir, exist_ok=True)
-
-    filename = Path(path).name
-    new_path = os.path.join(type_dir, filename)
-
-    # Prevent overwriting files with same name
-    if os.path.exists(new_path):
-        name, ext2 = os.path.splitext(filename)
-        counter = 1
-        while os.path.exists(new_path):
-            new_path = os.path.join(type_dir, f"{name}_{counter}{ext2}")
-            counter += 1
-
-    shutil.move(path, new_path)
-
-    return topic, file_type, new_path
+    return coarse, fine, file_type_folder, str(dest_path)
