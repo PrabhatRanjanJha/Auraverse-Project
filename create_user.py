@@ -1,7 +1,10 @@
 """
 create_user.py
-Creates users with hashed passwords into users.json
-USING pbkdf2_sha256 (safe & windows-friendly)
+
+Create a user and store a hashed password in users.json.
+
+Usage:
+    python create_user.py
 """
 
 import json
@@ -12,24 +15,33 @@ from passlib.hash import pbkdf2_sha256
 USERS_FILE = "users.json"
 
 def load_users():
-    if not Path(USERS_FILE).exists():
+    p = Path(USERS_FILE)
+    if not p.exists():
         return {}
-    return json.loads(Path(USERS_FILE).read_text())
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
-def save_users(data):
-    Path(USERS_FILE).write_text(json.dumps(data, indent=4))
+def save_users(users):
+    Path(USERS_FILE).write_text(json.dumps(users, indent=4), encoding="utf-8")
 
-if __name__ == "__main__":
+def main():
     username = input("Enter username: ").strip()
+    if not username:
+        print("Invalid username")
+        return
+
     password = getpass.getpass("Enter password: ")
     password2 = getpass.getpass("Confirm password: ")
-
     if password != password2:
         print("Passwords do not match.")
-        exit()
+        return
 
     users = load_users()
-    users[username] = pbkdf2_sha256.hash(password)   # << CHANGED HERE
+    users[username] = pbkdf2_sha256.hash(password)
     save_users(users)
+    print(f"User '{username}' created/updated in {USERS_FILE}")
 
-    print("User created:", username)
+if __name__ == "__main__":
+    main()
