@@ -1,116 +1,176 @@
-"""
-app.py - Streamlit frontend
-"""
-
 import streamlit as st
 import requests
+import json
 
-# <-- set this to your laptop backend URL (LAN address)
-BACKEND_URL = "http://192.168.2.14:8000"
+BACKEND = "http://localhost:8000"
 
-st.set_page_config(page_title="Secure File Manager", layout="centered")
+st.set_page_config(page_title="Secure File Manager", layout="wide")
 
+# -----------------------
+# Login session state
+# -----------------------
 if "token" not in st.session_state:
     st.session_state.token = None
-if "username" not in st.session_state:
-    st.session_state.username = None
 
-st.title("Secure File Manager")
+st.title("Secure File Uploader / Downloader")
 
-# small CSS to avoid green validation box
-hide_css = """
-<style>
-    .stTextInput > div > div > input:valid {
-        box-shadow: none !important;
-        border-color: #ced4da !important;
-    }
-</style>
-"""
-st.markdown(hide_css, unsafe_allow_html=True)
-
-# ------------------ LOGIN ------------------
+# -----------------------
+# LOGIN PAGE
+# -----------------------
 if not st.session_state.token:
     st.subheader("Login")
+
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
 
     if st.button("Login"):
         try:
-            r = requests.post(f"{BACKEND_URL}/login", json={"username": username, "password": password}, timeout=10)
-        except Exception as e:
-            st.error(f"Failed to reach backend: {e}")
+            r = requests.post(f"{BACKEND}/login", json={
+                "username": username,
+                "password": password
+            })
+        except:
+            st.error("Backend not running!")
+            st.stop()
+
+        if r.status_code == 200 and r.json().get("success"):
+            st.session_state.token = r.json()["token"]
+            st.success("Logged in successfully!")
+            st.rerun()
         else:
-            if r.status_code == 200 and r.json().get("success"):
-                st.session_state.token = r.json()["token"]
-                st.session_state.username = username
-                st.success("Logged in")
-                st.rerun()
-            else:
-                msg = r.json().get("msg") if r.headers.get("Content-Type", "").startswith("application/json") else "Invalid credentials"
-                st.error(msg)
+            st.error(r.json().get("error", "Login failed"))
 
-# ------------------ MAIN ------------------
-else:
-    st.write(f"Logged in as **{st.session_state.username}**")
-    st.button("Logout", on_click=lambda: (st.session_state.clear(), st.experimental_rerun()))
+    st.stop()
 
-    st.write("## Upload a file")
-    uploaded = st.file_uploader("Choose a file", type=None)
+# -----------------------
+# MAIN APP (AFTER LOGIN)
+# -----------------------
+st.success("Logged in")
 
-    if uploaded is not None:
-        if st.button("Upload"):
-            files = {"file": (uploaded.name, uploaded.read())}
-            headers = {"Authorization": st.session_state.token}
-            try:
-                r = requests.post(f"{BACKEND_URL}/upload", files=files, headers=headers, timeout=60)
-            except Exception as e:
-                st.error(f"Upload failed: {e}")
-            else:
-                if r.status_code == 200:
-                    j = r.json()
-                    st.success("Upload successful")
-                    st.write("File ID (save this to download later):")
-                    st.code(j.get("file_id"))
-                    st.write("File type detected:", j.get("file_type"))
-                else:
-                    try:
-                        st.error(r.json().get("error", "Upload error"))
-                    except:
-                        st.error("Upload error")
+token_header = {"Authorization": st.session_state.token}
 
-    st.write("---")
-    st.write("## Download by File ID")
-    fid = st.text_input("Enter File ID to download")
+col1, col2 = st.columns(2)
 
-    if st.button("Download"):
-        if not fid:
-            st.error("Enter a File ID")
+# ------------------------------------------------
+#  COLUMN 1 - NORMAL FILE UPLOAD (images/videos/pdf/txt/etc.)
+# ------------------------------------------------
+with col1:
+    st.header("Upload a file")
+
+    uploaded_file = st.file_uploader("Choose any file", accept_multiple_files=False)
+
+    if uploaded_file:
+        files = {
+            "file": (uploaded_file.name, uploaded_file.read())
+        }
+        r = requests.post(f"{BACKEND}/upload", files=files, headers=token_header)
+
+        if r.status_code == 200:
+            res = r.json()
+            st.success(f"Uploaded! UUID: {res['uuid']}")
+            st.code(res["uuid"])
+            st.write(f"Type detected: **{res['type']}**")
         else:
-            headers = {"Authorization": st.session_state.token}
-            try:
-                r = requests.get(f"{BACKEND_URL}/download/{fid}", headers=headers, stream=True, timeout=60)
-            except Exception as e:
-                st.error(f"Failed to reach backend: {e}")
+            st.error("Upload failed.")
+            st.write(r.text)
+
+# ------------------------------------------------
+#  COLUMN 1 (B) - JSON FILE OR TEXT UPLOAD
+# ------------------------------------------------
+with col1:
+    st.subheader("Upload JSON")
+
+    json_file = st.file_uploader("Upload .json file", type=["json"])
+
+    if json_file:
+        files = {"file": (json_file.name, json_file.read())}
+        r = requests.post(f"{BACKEND}/upload", files=files, headers=token_header)
+
+        if r.status_code == 200:
+            res = r.json()
+            st.success(f"JSON processed. UUID: {res['uuid']}")
+            st.code(res["uuid"])
+            st.info(f"Identified as: **{res['type']}**")
+            st.write("Reason:")
+            st.write(res["reason"])
+        else:
+            st.error("JSON upload failed.")
+            st.write(r.text)
+
+# ------------------------------------------------
+#  COLUMN 1 (C) - JSON TEXT AREA
+# ------------------------------------------------
+with col1:
+    st.subheader("Paste JSON Text")
+
+    json_text = st.text_area("Enter JSON here")
+
+    if st.button("Submit JSON Text"):
+        if json_text.strip():
+            data = {"text_json": json_text}
+            r = requests.post(f"{BACKEND}/upload", data=data, headers=token_header)
+
+            if r.status_code == 200:
+                res = r.json()
+                st.success(f"JSON processed. UUID: {res['uuid']}")
+                st.code(res["uuid"])
+                st.info(f"Identified as: **{res['type']}**")
+                st.write(res["reason"])
             else:
-                ct = r.headers.get("Content-Type", "")
-                # If JSON -> error
-                if ct.startswith("application/json"):
-                    try:
-                        st.error(r.json().get("error", "Error"))
-                    except:
-                        st.error("Download error")
-                else:
-                    # get filename from header or fallback to fid
-                    cd = r.headers.get("Content-Disposition", "")
-                    if "filename=" in cd:
-                        fname = cd.split("filename=")[-1].strip().strip('"')
-                    else:
-                        # attempt to derive extension from content-type
-                        fname = fid
-                    # download via Streamlit
-                    st.download_button(
-                        label="Click to download file",
-                        data=r.content,
-                        file_name=fname,
-                        mime=ct if ct else None
-                    )
+                st.error("Invalid JSON text.")
+                st.write(r.text)
+
+# ------------------------------------------------
+#  COLUMN 2 - DOWNLOAD SECTION
+# ------------------------------------------------
+with col2:
+    st.header("Download by UUID")
+
+    uuid_inp = st.text_input("Enter UUID to download")
+
+    if st.button("Download", key="download_button"):
+        if uuid_inp.strip():
+            url = f"{BACKEND}/download/{uuid_inp}"
+            r = requests.get(url, headers=token_header)
+
+            if r.status_code == 200:
+                filename = (
+                    r.headers.get("Content-Disposition", "")
+                    .replace("attachment; filename=", "")
+                    .strip('"')
+                )
+
+                st.download_button(
+                    "Click to Download",
+                    r.content,
+                    file_name=filename
+                )
+
+            else:
+                st.error("Download failed.")
+                st.write(r.text)
+
+# ------------------------------------------------
+#  COLUMN 2 (B) - SHOW JSON DB
+# ------------------------------------------------
+with col2:
+    st.subheader("Show JSON Database Content")
+
+    uuid_show = st.text_input("UUID for viewing DB")
+
+    if st.button("Show Database"):
+        url = f"{BACKEND}/show_db/{uuid_show}"
+        r = requests.get(url, headers=token_header)
+
+        if r.status_code == 200:
+            res = r.json()
+            st.json(res)
+        else:
+            st.error("Error loading database")
+
+# ------------------------------------------------
+# LOGOUT BUTTON
+# ------------------------------------------------
+if st.button("Logout"):
+    st.session_state.token = None
+    st.rerun()

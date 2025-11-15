@@ -1,209 +1,237 @@
-"""
-backend.py - Flask backend
-Run on your laptop:
-    python backend.py
-
-Uploads stored at:
-    uploads/<username>/<FileType>/<uuid>.<ext>
-
-Files indexed at:
-    file_index.json
-
-Users stored at:
-    users.json  (created using create_user.py)
-Sessions stored at:
-    sessions.json
-"""
-
-import os
+# backend.py
+from flask import Flask, request, jsonify, send_file
 import json
+import os
 import uuid
-import time
-from pathlib import Path
-
-from flask import Flask, request, send_file, jsonify
 from passlib.hash import pbkdf2_sha256
-from werkzeug.utils import secure_filename
+import mimetypes
+import sqlite3
 
-from classifier import detect_filetype
+from backend_core import (
+    detect_sql,
+    create_sql_db,
+    create_doc_db,
+    save_regular_file,
+    DB_INDEX
+)
 
 app = Flask(__name__)
 
-# ---------------------------
-# Paths
-# ---------------------------
-USERS_FILE = "users.json"
-INDEX_FILE = "file_index.json"
-SESSIONS_FILE = "sessions.json"
-UPLOADS_DIR = "uploads"
+USERS_JSON = "users.json"
 
-# ---------------------------
-# JSON Helpers
-# ---------------------------
-def load_json(path):
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+# Ensure users store
+if not os.path.exists(USERS_JSON):
+    with open(USERS_JSON, "w", encoding="utf-8") as f:
+        json.dump({}, f, indent=4)
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+# Ensure DB index
+if not os.path.exists(DB_INDEX):
+    with open(DB_INDEX, "w", encoding="utf-8") as f:
+        json.dump({}, f, indent=4)
 
-# ---------------------------
-# Auth Helpers
-# ---------------------------
-def verify_user(username, password):
-    users = load_json(USERS_FILE)
-    if username not in users:
-        return False
-    try:
-        return pbkdf2_sha256.verify(password, users[username])
-    except Exception:
-        return False
 
-def create_session(username):
-    sessions = load_json(SESSIONS_FILE)
-    token = str(uuid.uuid4())
-    sessions[token] = {
-        "username": username,
-        "created_at": int(time.time())
-    }
-    save_json(SESSIONS_FILE, sessions)
-    return token
+# -------------------------------
+# AUTH HELPERS
+# -------------------------------
+def generate_token(username):
+    return f"{username}:{uuid.uuid4().hex}"
 
-def get_username_from_token(token):
-    if not token:
+
+def verify_token(token):
+    if not token or ":" not in token:
         return None
-    sessions = load_json(SESSIONS_FILE)
-    return sessions.get(token, {}).get("username")
+    username = token.split(":", 1)[0]
+    with open(USERS_JSON, "r", encoding="utf-8") as f:
+        users = json.load(f)
+    return username if username in users else None
 
-# ---------------------------
-# Init folders
-# ---------------------------
-Path(UPLOADS_DIR).mkdir(parents=True, exist_ok=True)
 
-# ===========================
-#         ROUTES
-# ===========================
-
-# ---------------------------
+# -------------------------------
 # LOGIN
-# ---------------------------
+# -------------------------------
 @app.post("/login")
 def login():
-    data = request.get_json(force=True)
+    data = request.json or {}
     username = data.get("username")
     password = data.get("password")
 
     if not username or not password:
-        return jsonify({"success": False, "msg": "Missing credentials"}), 400
+        return jsonify({"success": False, "error": "username/password required"}), 400
 
-    if verify_user(username, password):
-        token = create_session(username)
-        return jsonify({"success": True, "token": token})
+    with open(USERS_JSON, "r", encoding="utf-8") as f:
+        users = json.load(f)
 
-    return jsonify({"success": False, "msg": "Invalid credentials"}), 401
+    if username not in users:
+        return jsonify({"success": False, "error": "Invalid login"}), 401
 
-# ---------------------------
-# UPLOAD
-# ---------------------------
+    if not pbkdf2_sha256.verify(password, users[username]):
+        return jsonify({"success": False, "error": "Invalid login"}), 401
+
+    token = generate_token(username)
+    return jsonify({"success": True, "token": token})
+
+
+# -------------------------------
+# UPLOAD (JSON + FILES)
+# -------------------------------
 @app.post("/upload")
 def upload():
     token = request.headers.get("Authorization")
-    username = get_username_from_token(token)
-
+    username = verify_token(token)
     if not username:
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
 
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+    # If file upload
+    if "file" in request.files:
+        f = request.files["file"]
+        os.makedirs("temp_upload", exist_ok=True)
+        temp_path = os.path.join("temp_upload", f.filename)
+        f.save(temp_path)
 
-    f = request.files["file"]
-    if f.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
+        # -------- JSON file case --------
+        if f.filename.lower().endswith(".json"):
+            try:
+                with open(temp_path, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+            except Exception:
+                return jsonify({"success": False, "error": "Invalid JSON"}), 400
 
-    # Get original extension
-    orig_name = secure_filename(f.filename)
-    _, ext = os.path.splitext(orig_name)
-    ext = ext.lower()
+            # Normalize for SQL detection
+            if isinstance(data, dict):
+                rows = [data]
+            elif isinstance(data, list):
+                rows = data
+            else:
+                return jsonify({"success": False, "error": "JSON must be dict or list"}), 400
 
-    # Save temp file
-    tmp_name = f"tmp_{uuid.uuid4().hex}{ext}"
-    tmp_path = Path(tmp_name)
-    f.save(tmp_path)
+            is_sql, reason = detect_sql(rows)
 
-    # Detect file type folder (Images, Videos, Audio, Documents, Others)
-    file_type = detect_filetype(str(tmp_path))
+            if is_sql:
+                db_uuid, db_path = create_sql_db(username, rows)
+                return jsonify({"success": True, "type": "sql", "uuid": db_uuid, "reason": reason})
 
-    # Generate file UUID
-    file_id = str(uuid.uuid4())
+            else:
+                db_uuid, db_path = create_doc_db(username, data)
+                return jsonify({"success": True, "type": "doc", "uuid": db_uuid, "reason": reason})
 
-    # Final folder structure:
-    # uploads/<username>/<FileType>/
-    user_type_dir = Path(UPLOADS_DIR) / username / file_type
-    user_type_dir.mkdir(parents=True, exist_ok=True)
+        # -------- Regular file case (images/videos/pdf/etc.) --------
+        with open(temp_path, "rb") as rb:
+            file_bytes = rb.read()
 
-    # Final filename: uuid.ext
-    final_name = f"{file_id}{ext}"
-    final_path = user_type_dir / final_name
+        file_uuid, category, stored_path = save_regular_file(
+            temp_path, username, original_name=f.filename, data_bytes=file_bytes
+        )
 
-    # Move file
-    tmp_path.replace(final_path)
+        return jsonify({
+            "success": True,
+            "type": category,
+            "uuid": file_uuid
+        })
 
-    # Save metadata in file_index.json
-    index = load_json(INDEX_FILE)
-    index[file_id] = {
-        "path": str(final_path),
-        "owner": username,
-        "timestamp": int(time.time()),
-        "type": file_type,
-        "original_name": orig_name,
-    }
-    save_json(INDEX_FILE, index)
+    # TEXT JSON input
+    txt = request.form.get("text_json")
+    if txt:
+        try:
+            obj = json.loads(txt)
+        except:
+            return jsonify({"success": False, "error": "Invalid JSON text"}), 400
 
-    return jsonify({"file_id": file_id, "file_type": file_type})
+        rows = obj if isinstance(obj, list) else [obj]
 
-# ---------------------------
-# DOWNLOAD
-# ---------------------------
-@app.get("/download/<file_id>")
-def download(file_id):
+        is_sql, reason = detect_sql(rows)
+
+        if is_sql:
+            db_uuid, db_path = create_sql_db(username, rows)
+            return jsonify({"success": True, "type": "sql", "uuid": db_uuid, "reason": reason})
+
+        else:
+            db_uuid, db_path = create_doc_db(username, obj)
+            return jsonify({"success": True, "type": "doc", "uuid": db_uuid, "reason": reason})
+
+    return jsonify({"success": False, "error": "No input provided"}), 400
+
+
+# -------------------------------
+# DOWNLOAD (FINAL FIX — RETURNS ORIGINAL FILE WITHOUT CORRUPTION)
+# -------------------------------
+@app.get("/download/<uuid_code>")
+def download(uuid_code):
     token = request.headers.get("Authorization")
-    username = get_username_from_token(token)
-
+    username = verify_token(token)
     if not username:
         return jsonify({"error": "Unauthorized"}), 401
 
-    index = load_json(INDEX_FILE)
-    if file_id not in index:
-        return jsonify({"error": "File not found"}), 404
+    with open(DB_INDEX, "r", encoding="utf-8") as f:
+        index = json.load(f)
 
-    entry = index[file_id]
-    if entry["owner"] != username:
-        return jsonify({"error": "Forbidden"}), 403
+    if uuid_code not in index:
+        return jsonify({"error": "UUID not found"}), 404
 
-    file_path = entry["path"]
+    entry = index[uuid_code]
+    if entry.get("owner") != username:
+        return jsonify({"error": "Access denied"}), 403
+
+    file_path = entry.get("path")
+    original_name = entry.get("original_name", os.path.basename(file_path))
+
     if not os.path.exists(file_path):
-        return jsonify({"error": "File missing"}), 500
+        return jsonify({"error": "File missing"}), 404
 
-    filename = os.path.basename(file_path)
+    # ---- FIX: Serve binary file exactly as stored ----
+    mime, _ = mimetypes.guess_type(original_name)
+    if not mime:
+        mime = "application/octet-stream"
 
-    return send_file(file_path, as_attachment=True, download_name=filename)
+    return send_file(
+        file_path,
+        mimetype=mime,
+        as_attachment=True,
+        download_name=original_name
+    )
 
-# ---------------------------
-# Health check
-# ---------------------------
-@app.get("/ping")
-def ping():
-    return jsonify({"status": "ok"})
 
-# ---------------------------
-# Run server
-# ---------------------------
+# -------------------------------
+# SHOW DB CONTENT
+# -------------------------------
+@app.get("/show_db/<uuid_code>")
+def show_db(uuid_code):
+    token = request.headers.get("Authorization")
+    username = verify_token(token)
+    if not username:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    with open(DB_INDEX, "r") as f:
+        index = json.load(f)
+
+    if uuid_code not in index:
+        return jsonify({"error": "UUID not found"}), 404
+
+    entry = index[uuid_code]
+
+    if entry["owner"] != username:
+        return jsonify({"error": "Access denied"}), 403
+
+    if entry["type"] == "sql":
+        conn = sqlite3.connect(entry["path"])
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [t[0] for t in cur.fetchall()]
+
+        data = {}
+        for t in tables:
+            cur.execute(f"SELECT * FROM {t}")
+            rows = cur.fetchall()
+            cur.execute(f"PRAGMA table_info({t})")
+            cols = [c[1] for c in cur.fetchall()]
+            data[t] = {"columns": cols, "rows": rows}
+
+        conn.close()
+        return jsonify({"type": "sql", "data": data})
+
+    else:
+        with open(entry["path"], "r", encoding="utf-8") as fp:
+            return jsonify({"type": "doc", "data": json.load(fp)})
+
+
 if __name__ == "__main__":
-    print("Backend running on http://0.0.0.0:8000")
     app.run(host="0.0.0.0", port=8000)
